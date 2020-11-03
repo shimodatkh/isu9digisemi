@@ -16,8 +16,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
-	"sync"
-	"sync/atomic"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -151,8 +149,6 @@ type TransactionEvidence struct {
 	ItemRootCategoryID int       `json:"item_root_category_id" db:"item_root_category_id"`
 	CreatedAt          time.Time `json:"-" db:"created_at"`
 	UpdatedAt          time.Time `json:"-" db:"updated_at"`
-
-	ReserveID string `json:"-" db:"reserve_id"`
 }
 
 type Shipping struct {
@@ -988,151 +984,16 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 	m.Stop()
 	m = measure.Start("getTransactions:part3")
 
-	itemIDs := make([]interface{}, 0, len(items))
-	userIdUnique := make(map[int64]struct{})
-	var userIds []interface{}
-	categoryIdsUnique := make(map[int]struct{})
-	var categoryIds []interface{}
-	for _, i := range items {
-		itemIDs = append(itemIDs, i.ID)
-		id := i.SellerID
-		if _, ok := userIdUnique[id]; !ok {
-			userIds = append(userIds, id)
-			userIdUnique[id] = struct{}{}
-		}
-		id = i.BuyerID
-		if _, ok := userIdUnique[id]; !ok {
-			userIds = append(userIds, id)
-			userIdUnique[id] = struct{}{}
-		}
-		catID := i.CategoryID
-		if _, ok := categoryIdsUnique[catID]; !ok {
-			categoryIds = append(categoryIds, catID)
-			categoryIdsUnique[catID] = struct{}{}
-		}
-	}
-	var users map[int64]UserSimple
-	if len(userIds) > 0 {
-		query, args, err := sqlx.In("SELECT * FROM `users` WHERE `id` IN (?)", userIds)
-		if err != nil {
-			log.Print(err)
-			outputErrorMsg(w, http.StatusInternalServerError, "db error")
-			tx.Rollback()
-			return
-		}
-		var s []User
-		err = tx.SelectContext(r.Context(), &s, query, args...)
-		if err != nil {
-			log.Print(err)
-			outputErrorMsg(w, http.StatusInternalServerError, "db error")
-			tx.Rollback()
-			return
-		}
-		users = make(map[int64]UserSimple, len(s))
-		for _, u := range s {
-			users[u.ID] = UserSimple{
-				ID:           u.ID,
-				AccountName:  u.AccountName,
-				NumSellItems: u.NumSellItems,
-			}
-		}
-	}
-	var categories map[int]Category
-	if len(categoryIds) > 0 {
-		query, args, err := sqlx.In("SELECT * FROM `categories` WHERE `id` IN (?)", categoryIds)
-		if err != nil {
-			log.Print(err)
-			outputErrorMsg(w, http.StatusInternalServerError, "db error")
-			tx.Rollback()
-			return
-		}
-		var s []Category
-		err = tx.SelectContext(r.Context(), &s, query, args...)
-		if err != nil {
-			log.Print(err)
-			outputErrorMsg(w, http.StatusInternalServerError, "db error")
-			tx.Rollback()
-			return
-		}
-		categories = make(map[int]Category, len(s))
-		for _, c := range s {
-			if c.ParentID != 0 {
-				p, err := getCategoryByID(tx, c.ParentID)
-				if err == nil {
-					c.ParentCategoryName = p.CategoryName
-				}
-			}
-			categories[c.ID] = c
-		}
-	}
-	var transactionEvidences map[int64]TransactionEvidence
-	if len(itemIDs) > 0 {
-		query, args, err := sqlx.In("SELECT c.id,c.item_id,c.status,s.reserve_id FROM transaction_evidences c join shippings s on s.transaction_evidence_id = c.id where c.item_id in (?)", itemIDs)
-		if err != nil {
-			log.Print(err)
-			outputErrorMsg(w, http.StatusInternalServerError, "db error")
-			tx.Rollback()
-			return
-		}
-		var s []TransactionEvidence
-		err = tx.SelectContext(r.Context(), &s, query, args...)
-		if err != nil {
-			log.Print(err)
-			outputErrorMsg(w, http.StatusInternalServerError, "db error")
-			tx.Rollback()
-			return
-		}
-		transactionEvidences = make(map[int64]TransactionEvidence, len(s))
-		for _, c := range s {
-			transactionEvidences[c.ItemID] = c
-		}
-	}
-
-	var wg sync.WaitGroup
-	var shipmentStatuses sync.Map
-	var concurrentError atomic.Value
-	wg.Add(len(transactionEvidences))
-	for _, t := range transactionEvidences {
-		go func(t TransactionEvidence) {
-			defer wg.Done()
-			if t.ReserveID == "" {
-				return
-			}
-			ssr, err := APIShipmentStatus(getShipmentServiceURL(), &APIShipmentStatusReq{
-				ReserveID: t.ReserveID,
-			})
-			if err != nil {
-				concurrentError.Store(err)
-				// return
-			}
-			shipmentStatuses.Store(t.ItemID, ssr)
-		}(t)
-	}
-	wg.Wait()
-	cerr := concurrentError.Load()
-	if cerr != nil {
-		log.Print(cerr)
-		outputErrorMsg(w, http.StatusInternalServerError, "failed to request to shipment service")
-		tx.Rollback()
-		return
-	}
-
 	itemDetails := []ItemDetail{}
 	for _, item := range items {
-		m := measure.Start("getTransactions:part3-1")
-
-		seller, ok := users[item.SellerID]
-		if !ok {
+		seller, err := getUserSimpleByID(tx, item.SellerID)
+		if err != nil {
 			outputErrorMsg(w, http.StatusNotFound, "seller not found")
 			tx.Rollback()
 			return
 		}
-
-		m.Stop()
-		m = measure.Start("getTransactions:part3-2")
-
-		category, ok := categories[item.CategoryID]
-		if !ok {
+		category, err := getCategoryByID(tx, item.CategoryID)
+		if err != nil {
 			outputErrorMsg(w, http.StatusNotFound, "category not found")
 			tx.Rollback()
 			return
@@ -1157,12 +1018,9 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 			CreatedAt: item.CreatedAt.Unix(),
 		}
 
-		m.Stop()
-		m = measure.Start("getTransactions:part3-3")
-
 		if item.BuyerID != 0 {
-			buyer, ok := users[item.BuyerID]
-			if !ok {
+			buyer, err := getUserSimpleByID(tx, item.BuyerID)
+			if err != nil {
 				outputErrorMsg(w, http.StatusNotFound, "buyer not found")
 				tx.Rollback()
 				return
@@ -1171,30 +1029,46 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 			itemDetail.Buyer = &buyer
 		}
 
-		m.Stop()
-		m = measure.Start("getTransactions:part3-4")
+		transactionEvidence := TransactionEvidence{}
+		err = tx.Get(&transactionEvidence, "SELECT * FROM `transaction_evidences` WHERE `item_id` = ?", item.ID)
+		if err != nil && err != sql.ErrNoRows {
+			// It's able to ignore ErrNoRows
+			log.Print(err)
+			outputErrorMsg(w, http.StatusInternalServerError, "db error")
+			tx.Rollback()
+			return
+		}
 
-		transactionEvidence, ok := transactionEvidences[item.ID]
-
-		m.Stop()
-		m = measure.Start("getTransactions:part3-5")
-
-		if ok {
-			ssr, ok := shipmentStatuses.Load(item.ID)
-			if !ok {
+		if transactionEvidence.ID > 0 {
+			shipping := Shipping{}
+			err = tx.Get(&shipping, "SELECT * FROM `shippings` WHERE `transaction_evidence_id` = ?", transactionEvidence.ID)
+			if err == sql.ErrNoRows {
 				outputErrorMsg(w, http.StatusNotFound, "shipping not found")
+				tx.Rollback()
+				return
+			}
+			if err != nil {
+				log.Print(err)
+				outputErrorMsg(w, http.StatusInternalServerError, "db error")
+				tx.Rollback()
+				return
+			}
+			ssr, err := APIShipmentStatus(getShipmentServiceURL(), &APIShipmentStatusReq{
+				ReserveID: shipping.ReserveID,
+			})
+			if err != nil {
+				log.Print(err)
+				outputErrorMsg(w, http.StatusInternalServerError, "failed to request to shipment service")
 				tx.Rollback()
 				return
 			}
 
 			itemDetail.TransactionEvidenceID = transactionEvidence.ID
 			itemDetail.TransactionEvidenceStatus = transactionEvidence.Status
-			itemDetail.ShippingStatus = ssr.(*APIShipmentStatusRes).Status
+			itemDetail.ShippingStatus = ssr.Status
 		}
 
 		itemDetails = append(itemDetails, itemDetail)
-
-		m.Stop()
 	}
 	tx.Commit()
 
