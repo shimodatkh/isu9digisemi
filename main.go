@@ -911,6 +911,7 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 商品コードをリクエストから取得
 	query := r.URL.Query()
 	itemIDStr := query.Get("item_id")
 	var err error
@@ -923,6 +924,7 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 登録日時をリクエストから取得
 	createdAtStr := query.Get("created_at")
 	var createdAt int64
 	if createdAtStr != "" {
@@ -936,6 +938,8 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 	m.Stop()
 	m = measure.Start("getTransactions:part2")
 
+	// 入力の商品情報よりも登録日時が新しい出品商品 or 購入商品を取得する
+	// 商品情報がなければ、1ページ目の商品を取得する
 	tx := dbx.MustBegin()
 	items := []Item{}
 	if itemID > 0 && createdAt > 0 {
@@ -984,10 +988,12 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 	m.Stop()
 	m = measure.Start("getTransactions:part3")
 
+	// 全ての購入商品 or 出品商品に対して次の情報を取得する
 	itemDetails := []ItemDetail{}
 	for _, item := range items {
 		m := measure.Start("getTransactions:part3-1")
 
+		// 出品者の情報を取得する
 		seller, err := getUserSimpleByID(tx, item.SellerID)
 		if err != nil {
 			outputErrorMsg(w, http.StatusNotFound, "seller not found")
@@ -998,6 +1004,7 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 		m.Stop()
 		m = measure.Start("getTransactions:part3-2")
 
+		// カテゴリ情報取得する
 		category, err := getCategoryByID(tx, item.CategoryID)
 		if err != nil {
 			outputErrorMsg(w, http.StatusNotFound, "category not found")
@@ -1027,6 +1034,7 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 		m.Stop()
 		m = measure.Start("getTransactions:part3-3")
 
+		// 購入者情報を取得する
 		if item.BuyerID != 0 {
 			buyer, err := getUserSimpleByID(tx, item.BuyerID)
 			if err != nil {
@@ -1041,6 +1049,7 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 		m.Stop()
 		m = measure.Start("getTransactions:part3-4")
 
+		// 取引情報を取得する
 		transactionEvidence := TransactionEvidence{}
 		err = tx.Get(&transactionEvidence, "SELECT * FROM `transaction_evidences` WHERE `item_id` = ?", item.ID)
 		if err != nil && err != sql.ErrNoRows {
@@ -1054,6 +1063,7 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 		m.Stop()
 		m = measure.Start("getTransactions:part3-5")
 
+		// 発送情報を取得する
 		if transactionEvidence.ID > 0 {
 			shipping := Shipping{}
 			err = tx.Get(&shipping, "SELECT * FROM `shippings` WHERE `transaction_evidence_id` = ?", transactionEvidence.ID)
