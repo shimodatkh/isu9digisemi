@@ -399,7 +399,7 @@ func getStats(w http.ResponseWriter, r *http.Request) {
 
 	body := bytes.NewBufferString("key,count,sum,avg\n")
 	for _, s := range logs {
-		body.WriteString(fmt.Sprintf("%s,%d,%.0f,%.2f\n",
+		body.WriteString(fmt.Sprintf("%s,%d,%f,%f\n",
 			s.Key, s.Count, s.Sum, s.Avg))
 	}
 
@@ -986,18 +986,12 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 
 	itemDetails := []ItemDetail{}
 	for _, item := range items {
-		m := measure.Start("getTransactions:part3-1")
-
 		seller, err := getUserSimpleByID(tx, item.SellerID)
 		if err != nil {
 			outputErrorMsg(w, http.StatusNotFound, "seller not found")
 			tx.Rollback()
 			return
 		}
-
-		m.Stop()
-		m = measure.Start("getTransactions:part3-2")
-
 		category, err := getCategoryByID(tx, item.CategoryID)
 		if err != nil {
 			outputErrorMsg(w, http.StatusNotFound, "category not found")
@@ -1024,9 +1018,6 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 			CreatedAt: item.CreatedAt.Unix(),
 		}
 
-		m.Stop()
-		m = measure.Start("getTransactions:part3-3")
-
 		if item.BuyerID != 0 {
 			buyer, err := getUserSimpleByID(tx, item.BuyerID)
 			if err != nil {
@@ -1038,9 +1029,6 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 			itemDetail.Buyer = &buyer
 		}
 
-		m.Stop()
-		m = measure.Start("getTransactions:part3-4")
-
 		transactionEvidence := TransactionEvidence{}
 		err = tx.Get(&transactionEvidence, "SELECT * FROM `transaction_evidences` WHERE `item_id` = ?", item.ID)
 		if err != nil && err != sql.ErrNoRows {
@@ -1050,9 +1038,6 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 			tx.Rollback()
 			return
 		}
-
-		m.Stop()
-		m = measure.Start("getTransactions:part3-5")
 
 		if transactionEvidence.ID > 0 {
 			shipping := Shipping{}
@@ -1084,8 +1069,6 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 		}
 
 		itemDetails = append(itemDetails, itemDetail)
-
-		m.Stop()
 	}
 	tx.Commit()
 
